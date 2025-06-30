@@ -7,6 +7,8 @@ if (!isset($_SESSION['user']) || $_SESSION['role'] !== 'coordinator') {
     exit;
 }
 
+$coordinator_id = $_SESSION['user'];
+
 // ✅ Handle payment submission
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['pay_now'])) {
     $award_id = $_POST['award_id'];
@@ -28,19 +30,23 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['pay_now'])) {
             VALUES (?, NOW(), ?, ?, ?)");
         $stmt->bind_param("idss", $award_id, $amount, $reference, $month_year);
         if ($stmt->execute()) {
-            // ✅ Insert Notification
-            $appRes = $conn->query("SELECT application_id FROM Scholarship_Awarded WHERE award_id = $award_id");
-            if ($appRes && $appRow = $appRes->fetch_assoc()) {
+            $appRes = $conn->prepare("SELECT application_id FROM Scholarship_Awarded WHERE award_id = ?");
+            $appRes->bind_param("i", $award_id);
+            $appRes->execute();
+            $appRow = $appRes->get_result()->fetch_assoc();
+
+            if ($appRow) {
                 $application_id = $appRow['application_id'];
                 $message = "Scholarship payment for $month_year has been credited. Ref: $reference.";
-                $conn->query("INSERT INTO Notification (application_id, notif_date, status_message) 
-                              VALUES ($application_id, NOW(), '$message')");
+                $notif = $conn->prepare("INSERT INTO Notification (application_id, notif_date, status_message) VALUES (?, NOW(), ?)");
+                $notif->bind_param("is", $application_id, $message);
+                $notif->execute();
             }
         }
     }
 }
 
-// ✅ Get awarded scholarships
+// ✅ Get awarded scholarships only under coordinator's control
 $sql = "
 SELECT 
     sa.award_id,
@@ -52,10 +58,14 @@ FROM Scholarship_Awarded sa
 JOIN Application a ON sa.application_id = a.application_id
 JOIN Student s ON a.student_id = s.student_id
 JOIN Scholarship sc ON a.scholarship_id = sc.scholarship_id
+WHERE sc.coordinator_id = ?
 ORDER BY sa.award_date DESC
 ";
 
-$result = $conn->query($sql);
+$stmt = $conn->prepare($sql);
+$stmt->bind_param("s", $coordinator_id);
+$stmt->execute();
+$result = $stmt->get_result();
 ?>
 
 <!DOCTYPE html>
@@ -78,20 +88,19 @@ $result = $conn->query($sql);
 <h2>Awarded Scholarships – Monthly Payments</h2>
 
 <?php if ($result->num_rows === 0): ?>
-    <p>No awarded scholarships found.</p>
+    <p>No awarded scholarships found under your coordination.</p>
 <?php else: ?>
     <?php while ($row = $result->fetch_assoc()): ?>
         <div class="award-block">
-            <strong>Student:</strong> <?= $row['student_name'] ?><br>
-            <strong>Scholarship:</strong> <?= $row['scholarship_name'] ?><br>
-            <strong>Monthly Amount:</strong> Rs.<?= $row['monthly_amount'] ?><br>
-            <strong>Award Date:</strong> <?= $row['award_date'] ?><br><br>
+            <strong>Student:</strong> <?= htmlspecialchars($row['student_name']) ?><br>
+            <strong>Scholarship:</strong> <?= htmlspecialchars($row['scholarship_name']) ?><br>
+            <strong>Monthly Amount:</strong> Rs.<?= htmlspecialchars($row['monthly_amount']) ?><br>
+            <strong>Award Date:</strong> <?= htmlspecialchars($row['award_date']) ?><br><br>
 
             <?php
                 $aid = $row['award_id'];
                 $paidMonths = [];
 
-                // ✅ Get paid months
                 $paid_q = $conn->query("SELECT payment_month FROM Scholarship_Payment WHERE award_id = $aid");
                 while ($pm = $paid_q->fetch_assoc()) {
                     $paidMonths[] = $pm['payment_month'];
@@ -99,6 +108,7 @@ $result = $conn->query($sql);
 
                 $allMonths = ['January','February','March','April','May','June','July','August','September','October','November','December'];
                 $selectedYear = isset($_POST['year']) ? $_POST['year'] : date('Y');
+
                 $unpaidMonths = [];
                 foreach ($allMonths as $m) {
                     $combo = $m . ' ' . $selectedYear;
@@ -110,10 +120,10 @@ $result = $conn->query($sql);
 
             <?php if (count($unpaidMonths) > 0): ?>
                 <form method="POST">
-                    <input type="hidden" name="award_id" value="<?= $row['award_id'] ?>">
+                    <input type="hidden" name="award_id" value="<?= $aid ?>">
                     <div class="form-group">
                         <label>Year:
-                            <select name="year" required onchange="this.form.submit()">
+                            <select name="year" required>
                                 <?php
                                 $currentYear = date('Y');
                                 for ($y = $currentYear - 1; $y <= $currentYear + 1; $y++) {
